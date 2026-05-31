@@ -54,8 +54,6 @@ const els = {
   overlay: document.querySelector("#overlay"),
   cameraPanel: document.querySelector(".camera-panel"),
   volumeReadout: document.querySelector("#volumeReadout"),
-  spaceReadout: document.querySelector("#spaceReadout"),
-  handReadout: document.querySelector("#handReadout"),
 };
 
 const visualCtx = els.visual.getContext("2d", { alpha: false });
@@ -77,8 +75,9 @@ const state = {
   modelReady: false,
   detectFrames: 0,
   lastStatusAt: 0,
-  swipeSamples: [],
-  swipeCooldownUntil: 0,
+  pendingFingerCount: 0,
+  pendingFingerSince: 0,
+  trackGestureCooldownUntil: 0,
   trackFeedbackUntil: 0,
 };
 
@@ -140,6 +139,29 @@ function getHandMetrics(hand) {
     cluster,
     avgTipSpread,
   };
+}
+
+function countExtendedFingers(hand) {
+  const palmWidth = Math.max(0.025, distance(hand[5], hand[17]));
+  const wrist = hand[0];
+  const fingers = [
+    { tip: 8, pip: 6 },
+    { tip: 12, pip: 10 },
+    { tip: 16, pip: 14 },
+    { tip: 20, pip: 18 },
+  ];
+  let count = 0;
+
+  fingers.forEach(({ tip, pip }) => {
+    const extension = (distance(hand[tip], wrist) - distance(hand[pip], wrist)) / palmWidth;
+    if (extension > 0.18) count += 1;
+  });
+
+  const thumbSpread = distance(hand[4], hand[9]) / palmWidth;
+  const thumbExtension = (distance(hand[4], wrist) - distance(hand[3], wrist)) / palmWidth;
+  if (thumbSpread > 1.08 && thumbExtension > 0.05) count += 1;
+
+  return count;
 }
 
 function resizeCanvas(canvas, ctx) {
@@ -262,17 +284,15 @@ function selectTrack(id) {
   }
 }
 
-function shiftTrack(direction) {
-  if (state.tracks.length < 2) return;
+function selectTrackByFingerCount(fingerCount) {
+  if (fingerCount < 1 || fingerCount > state.tracks.length) return;
 
-  const currentIndex = state.tracks.findIndex((track) => track.id === state.activeTrackId);
-  const safeIndex = currentIndex === -1 ? 0 : currentIndex;
-  const nextIndex = (safeIndex + direction + state.tracks.length) % state.tracks.length;
-  const nextTrack = state.tracks[nextIndex];
+  const nextTrack = state.tracks[fingerCount - 1];
+  if (nextTrack.id === state.activeTrackId) return;
 
   selectTrack(nextTrack.id);
   state.trackFeedbackUntil = performance.now() + 950;
-  setTimedStatus(`Track: ${nextTrack.title}`, 0);
+  setTimedStatus(`Track ${fingerCount}: ${nextTrack.title}`, 0);
 }
 
 function createImpulseResponse(audioContext, seconds = 2.2, decay = 3.4) {
@@ -466,8 +486,9 @@ function stopCamera() {
   webcamStream = null;
   state.cameraActive = false;
   state.handCount = 0;
-  state.swipeSamples = [];
-  state.swipeCooldownUntil = 0;
+  state.pendingFingerCount = 0;
+  state.pendingFingerSince = 0;
+  state.trackGestureCooldownUntil = 0;
   state.trackFeedbackUntil = 0;
   state.modelReady = false;
   els.cameraButton.disabled = false;
@@ -491,68 +512,53 @@ function analyzeHands(hands) {
   if (!hands.length) {
     state.handCount = 0;
     state.targetSpace = lerp(state.targetSpace, 0, 0.04);
-    state.swipeSamples = [];
+    state.pendingFingerCount = 0;
+    state.pendingFingerSince = 0;
     return;
   }
 
   let spaceTotal = 0;
   let opennessTotal = 0;
   let volumeTotal = 0;
-  let openSwipeHand = null;
+  let trackFingerCount = 0;
 
   hands.forEach((hand) => {
     const metrics = getHandMetrics(hand);
+    const fingerCount = countExtendedFingers(hand);
 
     volumeTotal += metrics.openness;
     spaceTotal += metrics.spread - metrics.cluster;
     opennessTotal += metrics.avgTipSpread;
 
-    if (metrics.openness > 0.52 && (!openSwipeHand || metrics.openness > openSwipeHand.openness)) {
-      openSwipeHand = metrics;
-    }
+    trackFingerCount = Math.max(trackFingerCount, fingerCount);
   });
 
   state.handCount = hands.length;
   state.targetVolume = clamp(volumeTotal / hands.length, 0.03, 1);
   state.targetSpace = clamp(spaceTotal / hands.length, -1, 1);
   state.openness = opennessTotal / hands.length;
-  updateTrackSwipe(openSwipeHand);
+  updateTrackByFingerCount(trackFingerCount);
 }
 
-function updateTrackSwipe(openSwipeHand) {
+function updateTrackByFingerCount(fingerCount) {
   const now = performance.now();
 
-  if (!openSwipeHand) {
-    state.swipeSamples = state.swipeSamples.filter((sample) => now - sample.time < 240);
+  if (fingerCount < 1 || fingerCount > state.tracks.length) {
+    state.pendingFingerCount = 0;
+    state.pendingFingerSince = 0;
     return;
   }
 
-  const displayX = 1 - openSwipeHand.center.x;
-  const displayY = openSwipeHand.center.y;
-
-  state.swipeSamples.push({
-    openness: openSwipeHand.openness,
-    time: now,
-    x: displayX,
-    y: displayY,
-  });
-  state.swipeSamples = state.swipeSamples.filter((sample) => now - sample.time < 760);
-
-  if (now < state.swipeCooldownUntil || state.swipeSamples.length < 2) return;
-
-  const first = state.swipeSamples[0];
-  const last = state.swipeSamples[state.swipeSamples.length - 1];
-  const dx = last.x - first.x;
-  const dy = Math.abs(last.y - first.y);
-  const dt = Math.max(1, last.time - first.time);
-  const velocity = Math.abs(dx) / dt;
-  const maxOpenness = Math.max(...state.swipeSamples.map((sample) => sample.openness));
-
-  if (Math.abs(dx) > 0.12 && dy < 0.24 && velocity > 0.0002 && maxOpenness > 0.62) {
-    shiftTrack(dx > 0 ? 1 : -1);
-    state.swipeSamples = [];
-    state.swipeCooldownUntil = now + 850;
+  if (fingerCount !== state.pendingFingerCount) {
+    state.pendingFingerCount = fingerCount;
+    state.pendingFingerSince = now;
+    return;
   }
+
+  if (now < state.trackGestureCooldownUntil || now - state.pendingFingerSince < 260) return;
+
+  selectTrackByFingerCount(fingerCount);
+  state.trackGestureCooldownUntil = now + 900;
 }
 
 function drawHandOverlay(hands) {
@@ -599,7 +605,7 @@ function detectHands() {
         drawHandOverlay(hands);
 
         if (hands.length) {
-          setTimedStatus("Open hand controls volume, swipe to change track", 420);
+          setTimedStatus("Finger count selects track", 420);
         } else if (state.detectFrames > 10) {
           setTimedStatus("Model ready, show your palm", 900);
         }
@@ -688,8 +694,6 @@ function drawVisual() {
   });
 
   els.volumeReadout.textContent = Math.round(state.volume * 100);
-  els.spaceReadout.textContent = Math.round(state.space * 100);
-  els.handReadout.textContent = state.handCount;
   applyAudioState();
 
   animationHandle = requestAnimationFrame(drawVisual);

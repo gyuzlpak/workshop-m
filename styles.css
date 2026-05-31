@@ -151,7 +151,6 @@ input {
 .meters {
   display: flex;
   align-items: end;
-  gap: 26px;
   min-width: 0;
 }
 
@@ -231,8 +230,8 @@ input {
   z-index: 1;
   top: 88px;
   right: clamp(18px, 4vw, 48px);
-  width: min(28vw, 360px);
-  min-width: 220px;
+  width: min(16vw, 190px);
+  min-width: 132px;
   aspect-ratio: 4 / 3;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -258,10 +257,6 @@ input {
   height: 100%;
   object-fit: cover;
   transform: scaleX(-1);
-}
-
-.camera-panel video {
-  filter: grayscale(1) contrast(1.18);
 }
 
 .camera-panel canvas {
@@ -314,8 +309,8 @@ input {
   .camera-panel {
     top: 128px;
     right: 18px;
-    width: calc(100vw - 36px);
+    width: min(42vw, 170px);
     min-width: 0;
-    max-height: 34svh;
+    max-height: 22svh;
   }
 }
