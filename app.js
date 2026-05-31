@@ -74,7 +74,6 @@ const state = {
   space: 0,
   openness: 0,
   blobPhase: 0,
-  volumeGesture: null,
   modelReady: false,
   detectFrames: 0,
   lastStatusAt: 0,
@@ -99,34 +98,6 @@ function lerp(from, to, amount) {
 
 function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function getFingerScore(hand, tip, pip) {
-  const palmWidth = Math.max(0.025, distance(hand[5], hand[17]));
-  return (distance(hand[tip], hand[0]) - distance(hand[pip], hand[0])) / palmWidth;
-}
-
-function getHandPose(hand, index) {
-  const indexScore = getFingerScore(hand, 8, 6);
-  const middleScore = getFingerScore(hand, 12, 10);
-  const ringScore = getFingerScore(hand, 16, 14);
-  const pinkyScore = getFingerScore(hand, 20, 18);
-  const foldedScore = middleScore + ringScore + pinkyScore;
-  const foldedLimit = Math.max(0.18, indexScore * 0.62);
-
-  return {
-    hand,
-    index,
-    indexTip: hand[8],
-    indexScore,
-    foldedScore,
-    hasIndex: indexScore > 0.18,
-    isIndexOnly:
-      indexScore > 0.18 &&
-      middleScore < foldedLimit &&
-      ringScore < foldedLimit &&
-      pinkyScore < foldedLimit,
-  };
 }
 
 function resizeCanvas(canvas, ctx) {
@@ -439,7 +410,6 @@ function stopCamera() {
   webcamStream = null;
   state.cameraActive = false;
   state.handCount = 0;
-  state.volumeGesture = null;
   state.modelReady = false;
   els.cameraButton.disabled = false;
   els.cameraButton.textContent = "Camera";
@@ -461,41 +431,13 @@ function waitForVideoFrame() {
 function analyzeHands(hands) {
   if (!hands.length) {
     state.handCount = 0;
-    state.volumeGesture = null;
     state.targetSpace = lerp(state.targetSpace, 0, 0.04);
     return;
   }
 
   let spaceTotal = 0;
   let opennessTotal = 0;
-  const poses = hands.map((hand, index) => getHandPose(hand, index));
-  const anchor = poses
-    .filter((pose) => pose.isIndexOnly)
-    .sort((a, b) => a.foldedScore - b.foldedScore)[0];
-  const controller = anchor
-    ? poses
-        .filter((pose) => pose.index !== anchor.index && pose.hasIndex)
-        .sort((a, b) => b.indexScore - a.indexScore)[0]
-    : null;
-
-  if (anchor && controller) {
-    const relativeY = anchor.indexTip.y - controller.indexTip.y;
-    state.targetVolume = clamp(0.5 + relativeY * 1.65, 0.03, 1);
-    state.volumeGesture = {
-      anchor: anchor.indexTip,
-      controller: controller.indexTip,
-      relativeY,
-    };
-  } else if (anchor) {
-    state.targetVolume = 0.5;
-    state.volumeGesture = {
-      anchor: anchor.indexTip,
-      controller: null,
-      relativeY: 0,
-    };
-  } else {
-    state.volumeGesture = null;
-  }
+  let volumeTotal = 0;
 
   hands.forEach((hand) => {
     const tipIds = [4, 8, 12, 16, 20];
@@ -514,14 +456,19 @@ function analyzeHands(hands) {
     const avgTipToPalm =
       tipIds.reduce((sum, id) => sum + distance(hand[id], hand[0]) / palmWidth, 0) /
       tipIds.length;
+    const openBySpread = clamp((avgTipSpread - 0.85) / 2.15, 0, 1);
+    const openByPalm = clamp((avgTipToPalm - 1.15) / 1.15, 0, 1);
+    const handOpen = clamp(openBySpread * 0.68 + openByPalm * 0.32, 0, 1);
     const cluster = clamp((2.05 - avgTipToPalm) / 1.05, 0, 1);
     const spread = clamp((avgTipSpread - 1.65) / 1.35, 0, 1);
 
+    volumeTotal += handOpen;
     spaceTotal += spread - cluster;
     opennessTotal += avgTipSpread;
   });
 
   state.handCount = hands.length;
+  state.targetVolume = clamp(volumeTotal / hands.length, 0.03, 1);
   state.targetSpace = clamp(spaceTotal / hands.length, -1, 1);
   state.openness = opennessTotal / hands.length;
 }
@@ -552,43 +499,6 @@ function drawHandOverlay(hands) {
     });
   });
 
-  if (state.volumeGesture) {
-    const anchorX = state.volumeGesture.anchor.x * width;
-    const anchorY = state.volumeGesture.anchor.y * height;
-
-    overlayCtx.save();
-    overlayCtx.strokeStyle = "rgba(248, 248, 245, 0.95)";
-    overlayCtx.fillStyle = "rgba(248, 248, 245, 0.95)";
-    overlayCtx.lineWidth = 1.6;
-    overlayCtx.setLineDash([5, 5]);
-    overlayCtx.beginPath();
-    overlayCtx.moveTo(0, anchorY);
-    overlayCtx.lineTo(width, anchorY);
-    overlayCtx.stroke();
-    overlayCtx.setLineDash([]);
-    overlayCtx.beginPath();
-    overlayCtx.moveTo(anchorX, anchorY);
-    overlayCtx.lineTo(controlX, controlY);
-    overlayCtx.stroke();
-    overlayCtx.beginPath();
-    overlayCtx.arc(anchorX, anchorY, 7, 0, Math.PI * 2);
-    overlayCtx.stroke();
-
-    if (state.volumeGesture.controller) {
-      const controlX = state.volumeGesture.controller.x * width;
-      const controlY = state.volumeGesture.controller.y * height;
-
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(anchorX, anchorY);
-      overlayCtx.lineTo(controlX, controlY);
-      overlayCtx.stroke();
-      overlayCtx.beginPath();
-      overlayCtx.arc(controlX, controlY, 6, 0, Math.PI * 2);
-      overlayCtx.fill();
-    }
-
-    overlayCtx.restore();
-  }
 }
 
 function detectHands() {
@@ -606,12 +516,8 @@ function detectHands() {
         analyzeHands(hands);
         drawHandOverlay(hands);
 
-        if (state.volumeGesture?.controller) {
-          setTimedStatus("Index volume active", 220);
-        } else if (state.volumeGesture) {
-          setTimedStatus("Anchor index is volume 50", 420);
-        } else if (hands.length) {
-          setTimedStatus("Set anchor index + control index", 420);
+        if (hands.length) {
+          setTimedStatus("Open hand raises volume", 420);
         } else if (state.detectFrames > 10) {
           setTimedStatus("Model ready, show your palm", 900);
         }
