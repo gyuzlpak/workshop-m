@@ -4,10 +4,19 @@ const BUILT_IN_TRACKS = [
   { id: "track-03", title: "Track 03", src: "./audio/track-03.mp3" },
 ];
 
-const WASM_URL =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
-const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const VISION_IMPORT_URLS = [
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/+esm",
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest",
+];
+const WASM_URLS = [
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm",
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm",
+];
+const MODEL_URLS = [
+  "https://storage.googleapis.com/mediapipe-tasks/hand_landmarker/hand_landmarker.task",
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+];
 
 const HAND_CONNECTIONS = [
   [0, 1],
@@ -77,6 +86,7 @@ let webcamStream = null;
 let lastVideoTime = -1;
 let animationHandle = null;
 let detectHandle = null;
+let lastModelError = null;
 
 function clamp(value, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
@@ -137,6 +147,41 @@ function getCameraErrorMessage(error) {
   }
 
   return "Camera unavailable";
+}
+
+function getModelErrorMessage(error) {
+  const message = String(error?.message || error || "");
+
+  if (message.includes("Failed to fetch") || message.includes("NetworkError")) {
+    return "Hand model network failed";
+  }
+
+  if (message.includes("import")) {
+    return "MediaPipe import failed";
+  }
+
+  if (message.includes("WebAssembly") || message.includes("wasm")) {
+    return "MediaPipe wasm failed";
+  }
+
+  return "Hand model failed";
+}
+
+async function loadVisionTasks() {
+  if (visionTasks) return visionTasks;
+
+  let error = null;
+  for (const url of VISION_IMPORT_URLS) {
+    try {
+      visionTasks = await import(url);
+      return visionTasks;
+    } catch (nextError) {
+      error = nextError;
+      console.error(`MediaPipe import failed: ${url}`, nextError);
+    }
+  }
+
+  throw error;
 }
 
 function renderTracks() {
@@ -273,39 +318,45 @@ async function initHandLandmarker() {
   if (handLandmarker) return handLandmarker;
 
   setStatus("Loading hand model");
-  if (!visionTasks) {
-    visionTasks = await import(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22"
-    );
-  }
-
+  await loadVisionTasks();
   const { FilesetResolver, HandLandmarker } = visionTasks;
-  const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
-  const options = {
-    baseOptions: {
-      modelAssetPath: MODEL_URL,
-      delegate: "GPU",
-    },
-    runningMode: "VIDEO",
-    numHands: 4,
-    minHandDetectionConfidence: 0.32,
-    minHandPresenceConfidence: 0.32,
-    minTrackingConfidence: 0.32,
-  };
 
-  try {
-    handLandmarker = await HandLandmarker.createFromOptions(fileset, options);
-  } catch {
-    handLandmarker = await HandLandmarker.createFromOptions(fileset, {
-      ...options,
-      baseOptions: {
-        modelAssetPath: MODEL_URL,
-        delegate: "CPU",
-      },
-    });
+  for (const wasmUrl of WASM_URLS) {
+    let fileset = null;
+
+    try {
+      fileset = await FilesetResolver.forVisionTasks(wasmUrl);
+    } catch (error) {
+      lastModelError = error;
+      console.error(`MediaPipe wasm failed: ${wasmUrl}`, error);
+      continue;
+    }
+
+    for (const modelUrl of MODEL_URLS) {
+      for (const delegate of ["GPU", undefined]) {
+        try {
+          handLandmarker = await HandLandmarker.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: modelUrl,
+              ...(delegate ? { delegate } : {}),
+            },
+            runningMode: "VIDEO",
+            numHands: 4,
+            minHandDetectionConfidence: 0.32,
+            minHandPresenceConfidence: 0.32,
+            minTrackingConfidence: 0.32,
+          });
+
+          return handLandmarker;
+        } catch (error) {
+          lastModelError = error;
+          console.error(`Hand model failed: ${modelUrl}`, error);
+        }
+      }
+    }
   }
 
-  return handLandmarker;
+  throw lastModelError || new Error("Hand model failed");
 }
 
 async function startCamera() {
@@ -345,7 +396,7 @@ async function startCamera() {
     detectHands();
   } catch (error) {
     console.error(error);
-    setStatus("Camera on, hand model failed");
+    setStatus(`Camera on, ${getModelErrorMessage(error)}`);
   } finally {
     els.cameraButton.disabled = false;
   }
