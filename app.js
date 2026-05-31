@@ -77,6 +77,8 @@ const state = {
   modelReady: false,
   detectFrames: 0,
   lastStatusAt: 0,
+  swipeSamples: [],
+  swipeCooldownUntil: 0,
 };
 
 let audio = null;
@@ -98,6 +100,45 @@ function lerp(from, to, amount) {
 
 function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function getPalmCenter(hand) {
+  return {
+    x: (hand[0].x + hand[5].x + hand[9].x + hand[13].x + hand[17].x) / 5,
+    y: (hand[0].y + hand[5].y + hand[9].y + hand[13].y + hand[17].y) / 5,
+  };
+}
+
+function getHandMetrics(hand) {
+  const tipIds = [4, 8, 12, 16, 20];
+  const palmWidth = Math.max(0.025, distance(hand[5], hand[17]));
+  let tipSpread = 0;
+  let pairs = 0;
+
+  for (let i = 0; i < tipIds.length; i += 1) {
+    for (let j = i + 1; j < tipIds.length; j += 1) {
+      tipSpread += distance(hand[tipIds[i]], hand[tipIds[j]]) / palmWidth;
+      pairs += 1;
+    }
+  }
+
+  const avgTipSpread = tipSpread / pairs;
+  const avgTipToPalm =
+    tipIds.reduce((sum, id) => sum + distance(hand[id], hand[0]) / palmWidth, 0) /
+    tipIds.length;
+  const openBySpread = clamp((avgTipSpread - 0.85) / 2.15, 0, 1);
+  const openByPalm = clamp((avgTipToPalm - 1.15) / 1.15, 0, 1);
+  const openness = clamp(openBySpread * 0.68 + openByPalm * 0.32, 0, 1);
+  const cluster = clamp((2.05 - avgTipToPalm) / 1.05, 0, 1);
+  const spread = clamp((avgTipSpread - 1.65) / 1.35, 0, 1);
+
+  return {
+    center: getPalmCenter(hand),
+    openness,
+    spread,
+    cluster,
+    avgTipSpread,
+  };
 }
 
 function resizeCanvas(canvas, ctx) {
@@ -217,6 +258,18 @@ function selectTrack(id) {
   if (state.isPlaying) {
     playAudio();
   }
+}
+
+function shiftTrack(direction) {
+  if (state.tracks.length < 2) return;
+
+  const currentIndex = state.tracks.findIndex((track) => track.id === state.activeTrackId);
+  const safeIndex = currentIndex === -1 ? 0 : currentIndex;
+  const nextIndex = (safeIndex + direction + state.tracks.length) % state.tracks.length;
+  const nextTrack = state.tracks[nextIndex];
+
+  selectTrack(nextTrack.id);
+  setTimedStatus(nextTrack.title, 0);
 }
 
 function createImpulseResponse(audioContext, seconds = 2.2, decay = 3.4) {
@@ -410,6 +463,8 @@ function stopCamera() {
   webcamStream = null;
   state.cameraActive = false;
   state.handCount = 0;
+  state.swipeSamples = [];
+  state.swipeCooldownUntil = 0;
   state.modelReady = false;
   els.cameraButton.disabled = false;
   els.cameraButton.textContent = "Camera";
@@ -432,45 +487,62 @@ function analyzeHands(hands) {
   if (!hands.length) {
     state.handCount = 0;
     state.targetSpace = lerp(state.targetSpace, 0, 0.04);
+    state.swipeSamples = [];
     return;
   }
 
   let spaceTotal = 0;
   let opennessTotal = 0;
   let volumeTotal = 0;
+  let openSwipeHand = null;
 
   hands.forEach((hand) => {
-    const tipIds = [4, 8, 12, 16, 20];
-    const palmWidth = Math.max(0.025, distance(hand[5], hand[17]));
-    let tipSpread = 0;
-    let pairs = 0;
+    const metrics = getHandMetrics(hand);
 
-    for (let i = 0; i < tipIds.length; i += 1) {
-      for (let j = i + 1; j < tipIds.length; j += 1) {
-        tipSpread += distance(hand[tipIds[i]], hand[tipIds[j]]) / palmWidth;
-        pairs += 1;
-      }
+    volumeTotal += metrics.openness;
+    spaceTotal += metrics.spread - metrics.cluster;
+    opennessTotal += metrics.avgTipSpread;
+
+    if (metrics.openness > 0.74 && (!openSwipeHand || metrics.openness > openSwipeHand.openness)) {
+      openSwipeHand = metrics;
     }
-
-    const avgTipSpread = tipSpread / pairs;
-    const avgTipToPalm =
-      tipIds.reduce((sum, id) => sum + distance(hand[id], hand[0]) / palmWidth, 0) /
-      tipIds.length;
-    const openBySpread = clamp((avgTipSpread - 0.85) / 2.15, 0, 1);
-    const openByPalm = clamp((avgTipToPalm - 1.15) / 1.15, 0, 1);
-    const handOpen = clamp(openBySpread * 0.68 + openByPalm * 0.32, 0, 1);
-    const cluster = clamp((2.05 - avgTipToPalm) / 1.05, 0, 1);
-    const spread = clamp((avgTipSpread - 1.65) / 1.35, 0, 1);
-
-    volumeTotal += handOpen;
-    spaceTotal += spread - cluster;
-    opennessTotal += avgTipSpread;
   });
 
   state.handCount = hands.length;
   state.targetVolume = clamp(volumeTotal / hands.length, 0.03, 1);
   state.targetSpace = clamp(spaceTotal / hands.length, -1, 1);
   state.openness = opennessTotal / hands.length;
+  updateTrackSwipe(openSwipeHand);
+}
+
+function updateTrackSwipe(openSwipeHand) {
+  const now = performance.now();
+
+  if (!openSwipeHand) {
+    state.swipeSamples = [];
+    return;
+  }
+
+  const displayX = 1 - openSwipeHand.center.x;
+  const displayY = openSwipeHand.center.y;
+
+  state.swipeSamples.push({ x: displayX, y: displayY, time: now });
+  state.swipeSamples = state.swipeSamples.filter((sample) => now - sample.time < 520);
+
+  if (now < state.swipeCooldownUntil || state.swipeSamples.length < 2) return;
+
+  const first = state.swipeSamples[0];
+  const last = state.swipeSamples[state.swipeSamples.length - 1];
+  const dx = last.x - first.x;
+  const dy = Math.abs(last.y - first.y);
+  const dt = Math.max(1, last.time - first.time);
+  const velocity = Math.abs(dx) / dt;
+
+  if (Math.abs(dx) > 0.2 && dy < 0.16 && velocity > 0.00045) {
+    shiftTrack(dx > 0 ? 1 : -1);
+    state.swipeSamples = [];
+    state.swipeCooldownUntil = now + 900;
+  }
 }
 
 function drawHandOverlay(hands) {
@@ -517,7 +589,7 @@ function detectHands() {
         drawHandOverlay(hands);
 
         if (hands.length) {
-          setTimedStatus("Open hand raises volume", 420);
+          setTimedStatus("Open hand controls volume, swipe to change track", 420);
         } else if (state.detectFrames > 10) {
           setTimedStatus("Model ready, show your palm", 900);
         }
