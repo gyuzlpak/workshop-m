@@ -71,11 +71,17 @@ const state = {
   volume: 0.52,
   targetSpace: 0,
   space: 0,
+  targetFilter: 0,
+  filter: 0,
+  targetDistortion: 0,
+  distortion: 0,
   openness: 0,
   blobPhase: 0,
   modelReady: false,
   detectFrames: 0,
   lastStatusAt: 0,
+  rotationGesture: null,
+  tearSamples: [],
   pendingFingerCount: 0,
   pendingFingerSince: 0,
   trackGestureCooldownUntil: 0,
@@ -135,12 +141,19 @@ function getHandMetrics(hand) {
   const spread = clamp((avgTipSpread - 1.65) / 1.35, 0, 1);
 
   return {
+    angle: Math.atan2(hand[12].y - hand[0].y, hand[12].x - hand[0].x),
     center: getPalmCenter(hand),
     openness,
     spread,
     cluster,
     avgTipSpread,
   };
+}
+
+function normalizeAngleDelta(delta) {
+  if (delta > Math.PI) return delta - Math.PI * 2;
+  if (delta < -Math.PI) return delta + Math.PI * 2;
+  return delta;
 }
 
 function countExtendedFingers(hand) {
@@ -363,6 +376,19 @@ function selectTrackByFingerCount(fingerCount) {
   setTimedStatus(`Track ${fingerCount}: ${nextTrack.title}`, 0);
 }
 
+function createDistortionCurve(amount = 0.55) {
+  const length = 2048;
+  const curve = new Float32Array(length);
+  const drive = 1 + amount * 70;
+
+  for (let i = 0; i < length; i += 1) {
+    const x = (i * 2) / length - 1;
+    curve[i] = ((Math.PI + drive) * x) / (Math.PI + drive * Math.abs(x));
+  }
+
+  return curve;
+}
+
 function createImpulseResponse(audioContext, seconds = 2.2, decay = 3.4) {
   const rate = audioContext.sampleRate;
   const length = rate * seconds;
@@ -386,16 +412,25 @@ function setupAudio() {
   const context = new AudioContext();
   const source = context.createMediaElementSource(els.player);
   const volumeGain = context.createGain();
+  const toneFilter = context.createBiquadFilter();
   const dryGain = context.createGain();
   const clusterFilter = context.createBiquadFilter();
   const clusterGain = context.createGain();
   const convolver = context.createConvolver();
   const reverbGain = context.createGain();
+  const distortion = context.createWaveShaper();
+  const distortionGain = context.createGain();
   const compressor = context.createDynamicsCompressor();
 
+  toneFilter.type = "lowpass";
+  toneFilter.frequency.value = 22000;
+  toneFilter.Q.value = 0.7;
   clusterFilter.type = "lowpass";
   clusterFilter.frequency.value = 1200;
   clusterFilter.Q.value = 0.8;
+  distortion.curve = createDistortionCurve();
+  distortion.oversample = "4x";
+  distortionGain.gain.value = 0;
   convolver.buffer = createImpulseResponse(context);
   reverbGain.gain.value = 0;
   clusterGain.gain.value = 0;
@@ -408,23 +443,29 @@ function setupAudio() {
   compressor.release.value = 0.18;
 
   source.connect(volumeGain);
-  volumeGain.connect(dryGain);
-  volumeGain.connect(clusterFilter);
-  volumeGain.connect(convolver);
+  volumeGain.connect(toneFilter);
+  toneFilter.connect(dryGain);
+  toneFilter.connect(clusterFilter);
+  toneFilter.connect(convolver);
+  toneFilter.connect(distortion);
   clusterFilter.connect(clusterGain);
+  distortion.connect(distortionGain);
   dryGain.connect(compressor);
   clusterGain.connect(compressor);
+  distortionGain.connect(compressor);
   convolver.connect(reverbGain);
   reverbGain.connect(compressor);
   compressor.connect(context.destination);
 
   audio = {
     context,
+    distortionGain,
     volumeGain,
     dryGain,
     clusterFilter,
     clusterGain,
     reverbGain,
+    toneFilter,
   };
 
   return audio;
@@ -555,6 +596,8 @@ function stopCamera() {
   state.cameraActive = false;
   state.handCount = 0;
   state.hasHandInput = false;
+  state.rotationGesture = null;
+  state.tearSamples = [];
   state.pendingFingerCount = 0;
   state.pendingFingerSince = 0;
   state.trackGestureCooldownUntil = 0;
@@ -583,6 +626,10 @@ function analyzeHands(hands) {
     state.hasHandInput = false;
     state.targetVolume = lerp(state.targetVolume, state.volume, 0.06);
     state.targetSpace = lerp(state.targetSpace, 0, 0.04);
+    state.targetFilter = lerp(state.targetFilter, 0, 0.08);
+    state.targetDistortion = lerp(state.targetDistortion, 0, 0.14);
+    state.rotationGesture = null;
+    state.tearSamples = [];
     state.pendingFingerCount = 0;
     state.pendingFingerSince = 0;
     return;
@@ -592,6 +639,8 @@ function analyzeHands(hands) {
   let opennessTotal = 0;
   let volumeTotal = 0;
   let trackFingerCount = 0;
+  const centers = [];
+  let rotationHand = null;
 
   hands.forEach((hand) => {
     const metrics = getHandMetrics(hand);
@@ -602,6 +651,11 @@ function analyzeHands(hands) {
     opennessTotal += metrics.avgTipSpread;
 
     trackFingerCount = Math.max(trackFingerCount, fingerCount);
+    centers.push(metrics.center);
+
+    if (fingerCount >= 5 && metrics.openness > 0.72) {
+      rotationHand = metrics;
+    }
   });
 
   state.handCount = hands.length;
@@ -609,7 +663,69 @@ function analyzeHands(hands) {
   state.targetVolume = clamp(volumeTotal / hands.length, 0.03, 1);
   state.targetSpace = clamp(spaceTotal / hands.length, -1, 1);
   state.openness = opennessTotal / hands.length;
+  updateToneFilterByRotation(rotationHand);
+  updateDistortionByTear(centers);
   updateTrackByFingerCount(trackFingerCount);
+}
+
+function updateToneFilterByRotation(rotationHand) {
+  if (!rotationHand) {
+    state.rotationGesture = null;
+    state.targetFilter = lerp(state.targetFilter, 0, 0.08);
+    return;
+  }
+
+  const now = performance.now();
+  if (!state.rotationGesture) {
+    state.rotationGesture = {
+      angle: rotationHand.angle,
+      time: now,
+    };
+    return;
+  }
+
+  const delta = normalizeAngleDelta(rotationHand.angle - state.rotationGesture.angle);
+  const dt = Math.max(1, now - state.rotationGesture.time);
+  const rotationVelocity = clamp(delta / dt / 0.0032, -1, 1);
+
+  if (Math.abs(rotationVelocity) > 0.08) {
+    state.targetFilter = clamp(state.targetFilter + rotationVelocity * 0.12, -1, 1);
+  } else {
+    state.targetFilter = lerp(state.targetFilter, 0, 0.015);
+  }
+
+  state.rotationGesture.angle = rotationHand.angle;
+  state.rotationGesture.time = now;
+}
+
+function updateDistortionByTear(centers) {
+  const now = performance.now();
+
+  if (centers.length < 2) {
+    state.tearSamples = [];
+    state.targetDistortion = lerp(state.targetDistortion, 0, 0.12);
+    return;
+  }
+
+  let maxDistance = 0;
+  for (let i = 0; i < centers.length; i += 1) {
+    for (let j = i + 1; j < centers.length; j += 1) {
+      maxDistance = Math.max(maxDistance, distance(centers[i], centers[j]));
+    }
+  }
+
+  state.tearSamples.push({ distance: maxDistance, time: now });
+  state.tearSamples = state.tearSamples.filter((sample) => now - sample.time < 420);
+
+  if (state.tearSamples.length < 2) return;
+
+  const first = state.tearSamples[0];
+  const last = state.tearSamples[state.tearSamples.length - 1];
+  const dt = Math.max(1, last.time - first.time);
+  const spreadVelocity = (last.distance - first.distance) / dt;
+  const tear = clamp((spreadVelocity - 0.00035) / 0.0014, 0, 1);
+
+  state.targetDistortion = Math.max(state.targetDistortion * 0.82, tear);
 }
 
 function updateTrackByFingerCount(fingerCount) {
@@ -737,12 +853,22 @@ function applyAudioState() {
   const now = audio.context.currentTime;
   const spread = Math.max(0, state.space);
   const cluster = Math.max(0, -state.space);
+  const highPass = Math.max(0, state.filter);
+  const lowPass = Math.max(0, -state.filter);
 
   audio.volumeGain.gain.setTargetAtTime(state.volume, now, 0.045);
   audio.dryGain.gain.setTargetAtTime(1 - spread * 0.2 - cluster * 0.28, now, 0.08);
   audio.reverbGain.gain.setTargetAtTime(spread * 0.62, now, 0.1);
   audio.clusterGain.gain.setTargetAtTime(cluster * 0.52, now, 0.08);
   audio.clusterFilter.frequency.setTargetAtTime(1300 - cluster * 820, now, 0.08);
+  audio.toneFilter.type = highPass > lowPass ? "highpass" : "lowpass";
+  audio.toneFilter.frequency.setTargetAtTime(
+    highPass > lowPass ? 90 + highPass * 2500 : 22000 - lowPass * 20500,
+    now,
+    0.08
+  );
+  audio.toneFilter.Q.setTargetAtTime(0.7 + Math.abs(state.filter) * 2.6, now, 0.08);
+  audio.distortionGain.gain.setTargetAtTime(state.distortion * 0.5, now, 0.05);
 }
 
 function drawVisual() {
@@ -764,6 +890,9 @@ function drawVisual() {
   state.blobPhase += activity ? 0.012 + state.volume * 0.006 : 0.0025;
   state.volume = lerp(state.volume, state.targetVolume, 0.075);
   state.space = lerp(state.space, state.targetSpace, 0.065);
+  state.filter = lerp(state.filter, state.targetFilter, 0.08);
+  state.distortion = lerp(state.distortion, state.targetDistortion, 0.12);
+  state.targetDistortion = lerp(state.targetDistortion, 0, 0.035);
 
   visualCtx.fillStyle = "#f8f8f5";
   visualCtx.fillRect(0, 0, width, height);
