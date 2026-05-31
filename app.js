@@ -65,6 +65,9 @@ const state = {
   space: 0,
   openness: 0,
   blobPhase: 0,
+  modelReady: false,
+  detectFrames: 0,
+  lastStatusAt: 0,
 };
 
 let audio = null;
@@ -102,6 +105,14 @@ function resizeCanvas(canvas, ctx) {
 
 function setStatus(text) {
   els.status.textContent = text;
+}
+
+function setTimedStatus(text, interval = 700) {
+  const now = performance.now();
+  if (now - state.lastStatusAt < interval && els.status.textContent === text) return;
+
+  state.lastStatusAt = now;
+  setStatus(text);
 }
 
 function getCameraErrorMessage(error) {
@@ -277,6 +288,9 @@ async function initHandLandmarker() {
     },
     runningMode: "VIDEO",
     numHands: 4,
+    minHandDetectionConfidence: 0.32,
+    minHandPresenceConfidence: 0.32,
+    minTrackingConfidence: 0.32,
   };
 
   try {
@@ -315,13 +329,19 @@ async function startCamera() {
 
   els.webcam.srcObject = webcamStream;
   await els.webcam.play();
+  await waitForVideoFrame();
+
   state.cameraActive = true;
+  state.modelReady = false;
+  state.detectFrames = 0;
+  lastVideoTime = -1;
   els.cameraButton.textContent = "Stop";
   setStatus("Camera on");
 
   try {
     await initHandLandmarker();
-    setStatus("Move your hand");
+    state.modelReady = true;
+    setStatus("Model ready, show your palm");
     detectHands();
   } catch (error) {
     console.error(error);
@@ -339,11 +359,22 @@ function stopCamera() {
   webcamStream = null;
   state.cameraActive = false;
   state.handCount = 0;
+  state.modelReady = false;
   els.cameraButton.disabled = false;
   els.cameraButton.textContent = "Camera";
   els.cameraPanel.classList.remove("is-visible");
   cancelAnimationFrame(detectHandle);
   overlayCtx.clearRect(0, 0, els.overlay.width, els.overlay.height);
+}
+
+function waitForVideoFrame() {
+  if (els.webcam.videoWidth > 0 && els.webcam.videoHeight > 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    els.webcam.addEventListener("loadeddata", resolve, { once: true });
+  });
 }
 
 function analyzeHands(hands) {
@@ -420,13 +451,28 @@ function drawHandOverlay(hands) {
 function detectHands() {
   if (!state.cameraActive || !handLandmarker) return;
 
-  if (els.webcam.currentTime !== lastVideoTime) {
-    lastVideoTime = els.webcam.currentTime;
-    const result = handLandmarker.detectForVideo(els.webcam, performance.now());
-    const hands = result.landmarks || [];
+  if (els.webcam.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    try {
+      if (els.webcam.currentTime !== lastVideoTime) {
+        lastVideoTime = els.webcam.currentTime;
+        state.detectFrames += 1;
 
-    analyzeHands(hands);
-    drawHandOverlay(hands);
+        const result = handLandmarker.detectForVideo(els.webcam, performance.now());
+        const hands = result.landmarks || [];
+
+        analyzeHands(hands);
+        drawHandOverlay(hands);
+
+        if (hands.length) {
+          setTimedStatus(`${hands.length} hand${hands.length > 1 ? "s" : ""} detected`, 220);
+        } else if (state.detectFrames > 10) {
+          setTimedStatus("Model ready, show your palm", 900);
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      setTimedStatus("Hand detection retrying", 900);
+    }
   }
 
   detectHandle = requestAnimationFrame(detectHands);
