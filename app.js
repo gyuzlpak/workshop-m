@@ -89,6 +89,7 @@ let lastVideoTime = -1;
 let animationHandle = null;
 let detectHandle = null;
 let lastModelError = null;
+const artworkImages = new Map();
 
 function clamp(value, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
@@ -190,6 +191,85 @@ function setTimedStatus(text, interval = 700) {
   setStatus(text);
 }
 
+function readAscii(bytes, start, length) {
+  let result = "";
+  for (let i = start; i < start + length && i < bytes.length; i += 1) {
+    result += String.fromCharCode(bytes[i]);
+  }
+  return result;
+}
+
+function readSynchsafe(bytes, start) {
+  return (
+    (bytes[start] << 21) |
+    (bytes[start + 1] << 14) |
+    (bytes[start + 2] << 7) |
+    bytes[start + 3]
+  );
+}
+
+function readUint32(bytes, start) {
+  return (
+    (bytes[start] << 24) |
+    (bytes[start + 1] << 16) |
+    (bytes[start + 2] << 8) |
+    bytes[start + 3]
+  );
+}
+
+function loadArtworkImage(track) {
+  if (!track.artworkUrl || artworkImages.has(track.id)) return;
+
+  const image = new Image();
+  image.onload = () => {
+    artworkImages.set(track.id, image);
+  };
+  image.src = track.artworkUrl;
+}
+
+async function extractMp3Artwork(file) {
+  const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+  if (readAscii(header, 0, 3) !== "ID3") return null;
+
+  const tagSize = readSynchsafe(header, 6);
+  const tagBytes = new Uint8Array(await file.slice(0, 10 + tagSize).arrayBuffer());
+  const version = header[3];
+  let offset = 10;
+
+  while (offset + 10 < tagBytes.length) {
+    const frameId = readAscii(tagBytes, offset, 4);
+    if (!frameId.trim()) break;
+
+    const frameSize = version === 4 ? readSynchsafe(tagBytes, offset + 4) : readUint32(tagBytes, offset + 4);
+    const frameStart = offset + 10;
+    const frameEnd = frameStart + frameSize;
+
+    if (frameEnd > tagBytes.length || frameSize <= 0) break;
+
+    if (frameId === "APIC") {
+      let cursor = frameStart + 1;
+      const mimeStart = cursor;
+
+      while (cursor < frameEnd && tagBytes[cursor] !== 0) cursor += 1;
+
+      const mimeType = readAscii(tagBytes, mimeStart, cursor - mimeStart) || "image/jpeg";
+      cursor += 2;
+
+      while (cursor < frameEnd && tagBytes[cursor] !== 0) cursor += 1;
+      cursor += 1;
+
+      const imageBytes = tagBytes.slice(cursor, frameEnd);
+      if (!imageBytes.length) return null;
+
+      return URL.createObjectURL(new Blob([imageBytes], { type: mimeType }));
+    }
+
+    offset = frameEnd;
+  }
+
+  return null;
+}
+
 function getCameraErrorMessage(error) {
   if (!window.isSecureContext) {
     return "Open with http://localhost:8000";
@@ -276,6 +356,7 @@ function selectTrack(id) {
   state.hasTrack = true;
   els.player.src = track.src;
   els.player.load();
+  loadArtworkImage(track);
   renderTracks();
   setStatus(track.title);
 
@@ -589,6 +670,45 @@ function drawHandOverlay(hands) {
 
 }
 
+function drawTrackArtworks(centerX, centerY, baseRadius) {
+  const orbitX = baseRadius * (1.72 + state.volume * 0.28);
+  const orbitY = baseRadius * (1.18 + state.volume * 0.16);
+  const coverRadius = Math.max(18, Math.min(baseRadius * 0.16, 54));
+
+  state.tracks.forEach((track, index) => {
+    loadArtworkImage(track);
+
+    const phase =
+      state.blobPhase * (0.18 + index * 0.012) +
+      index * ((Math.PI * 2) / Math.max(1, state.tracks.length));
+    const x = centerX + Math.cos(phase) * orbitX;
+    const y = centerY + Math.sin(phase) * orbitY;
+    const isActive = track.id === state.activeTrackId;
+    const radius = coverRadius * (isActive ? 1.18 : 0.9);
+    const image = artworkImages.get(track.id);
+
+    visualCtx.save();
+    visualCtx.beginPath();
+    visualCtx.arc(x, y, radius, 0, Math.PI * 2);
+    visualCtx.clip();
+
+    if (image) {
+      const size = radius * 2;
+      visualCtx.drawImage(image, x - radius, y - radius, size, size);
+    } else {
+      visualCtx.fillStyle = isActive ? "#050505" : "#d8d5cd";
+      visualCtx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+    }
+
+    visualCtx.restore();
+    visualCtx.lineWidth = isActive ? 3 : 1;
+    visualCtx.strokeStyle = isActive ? "#050505" : "rgba(5, 5, 5, 0.28)";
+    visualCtx.beginPath();
+    visualCtx.arc(x, y, radius, 0, Math.PI * 2);
+    visualCtx.stroke();
+  });
+}
+
 function detectHands() {
   if (!state.cameraActive || !handLandmarker) return;
 
@@ -640,10 +760,11 @@ function drawVisual() {
   const height = els.visual.clientHeight;
   const centerX = width * 0.5;
   const centerY = height * 0.51;
-  const baseRadius = Math.min(width, height) * 0.245;
+  const volumeScale = 0.58 + state.volume * 0.62;
+  const baseRadius = Math.min(width, height) * 0.245 * volumeScale;
   const spread = Math.max(0, state.space);
   const cluster = Math.max(0, -state.space);
-  const pulse = 1 + (state.volume - 0.5) * 0.22;
+  const pulse = 1 + (state.volume - 0.5) * 0.1;
   const lobes = 3 + Math.round(spread * 3);
   const wobble = 0.08 + spread * 0.13 + cluster * 0.04;
 
@@ -693,22 +814,29 @@ function drawVisual() {
     visualCtx.fill();
   });
 
+  drawTrackArtworks(centerX, centerY, baseRadius);
+
   els.volumeReadout.textContent = Math.round(state.volume * 100);
   applyAudioState();
 
   animationHandle = requestAnimationFrame(drawVisual);
 }
 
-function loadLocalFiles(files) {
-  const newTracks = Array.from(files)
-    .filter((file) => file.type.startsWith("audio/"))
-    .map((file, index) => ({
+async function loadLocalFiles(files) {
+  const newTracks = await Promise.all(
+    Array.from(files)
+      .filter((file) => file.type.startsWith("audio/"))
+      .map(async (file, index) => ({
       id: `local-${Date.now()}-${index}`,
+      artworkUrl: await extractMp3Artwork(file),
       title: file.name.replace(/\.[^/.]+$/, ""),
       src: URL.createObjectURL(file),
-    }));
+    }))
+  );
 
   if (!newTracks.length) return;
+
+  newTracks.forEach(loadArtworkImage);
 
   state.tracks = [...newTracks, ...state.tracks];
   state.activeTrackId = newTracks[0].id;
@@ -739,8 +867,8 @@ function bindEvents() {
     }
   });
 
-  els.fileInput.addEventListener("change", (event) => {
-    loadLocalFiles(event.target.files);
+  els.fileInput.addEventListener("change", async (event) => {
+    await loadLocalFiles(event.target.files);
     event.target.value = "";
   });
 
