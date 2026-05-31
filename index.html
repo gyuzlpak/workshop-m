@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Handplay Music</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app" aria-label="Handplay Music">
+      <canvas id="visual" class="visual" aria-hidden="true"></canvas>
+
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="Handplay Music">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Handplay Music</span>
+        </a>
+
+        <div class="track-list" id="trackList" role="list" aria-label="음원 목록"></div>
+      </header>
+
+      <section class="stage" aria-label="음악 조작">
+        <div class="meters" aria-live="polite">
+          <div class="meter">
+            <span class="meter-label">Volume</span>
+            <span class="meter-value" id="volumeReadout">52</span>
+          </div>
+          <div class="meter">
+            <span class="meter-label">Space</span>
+            <span class="meter-value" id="spaceReadout">0</span>
+          </div>
+          <div class="meter">
+            <span class="meter-label">Hands</span>
+            <span class="meter-value" id="handReadout">0</span>
+          </div>
+        </div>
+
+        <div class="transport" aria-label="재생 제어">
+          <button id="playButton" class="button button-primary" type="button">Play</button>
+          <button id="cameraButton" class="button button-secondary" type="button">Camera</button>
+          <label class="file-control">
+            <input id="fileInput" type="file" accept="audio/*" multiple>
+            <span>MP3</span>
+          </label>
+        </div>
+
+        <p id="status" class="status">Select a track</p>
+      </section>
+
+      <aside class="camera-panel" aria-label="웹캠 프리뷰">
+        <video id="webcam" playsinline muted></video>
+        <canvas id="overlay" aria-hidden="true"></canvas>
+      </aside>
+
+      <audio id="player" crossorigin="anonymous" preload="none"></audio>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
