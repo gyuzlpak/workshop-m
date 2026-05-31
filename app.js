@@ -486,6 +486,13 @@ function analyzeHands(hands) {
       controller: controller.indexTip,
       relativeY,
     };
+  } else if (anchor) {
+    state.targetVolume = 0.5;
+    state.volumeGesture = {
+      anchor: anchor.indexTip,
+      controller: null,
+      relativeY: 0,
+    };
   } else {
     state.volumeGesture = null;
   }
@@ -548,8 +555,6 @@ function drawHandOverlay(hands) {
   if (state.volumeGesture) {
     const anchorX = state.volumeGesture.anchor.x * width;
     const anchorY = state.volumeGesture.anchor.y * height;
-    const controlX = state.volumeGesture.controller.x * width;
-    const controlY = state.volumeGesture.controller.y * height;
 
     overlayCtx.save();
     overlayCtx.strokeStyle = "rgba(248, 248, 245, 0.95)";
@@ -568,9 +573,20 @@ function drawHandOverlay(hands) {
     overlayCtx.beginPath();
     overlayCtx.arc(anchorX, anchorY, 7, 0, Math.PI * 2);
     overlayCtx.stroke();
-    overlayCtx.beginPath();
-    overlayCtx.arc(controlX, controlY, 6, 0, Math.PI * 2);
-    overlayCtx.fill();
+
+    if (state.volumeGesture.controller) {
+      const controlX = state.volumeGesture.controller.x * width;
+      const controlY = state.volumeGesture.controller.y * height;
+
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(anchorX, anchorY);
+      overlayCtx.lineTo(controlX, controlY);
+      overlayCtx.stroke();
+      overlayCtx.beginPath();
+      overlayCtx.arc(controlX, controlY, 6, 0, Math.PI * 2);
+      overlayCtx.fill();
+    }
+
     overlayCtx.restore();
   }
 }
@@ -590,8 +606,10 @@ function detectHands() {
         analyzeHands(hands);
         drawHandOverlay(hands);
 
-        if (state.volumeGesture) {
+        if (state.volumeGesture?.controller) {
           setTimedStatus("Index volume active", 220);
+        } else if (state.volumeGesture) {
+          setTimedStatus("Anchor index is volume 50", 420);
         } else if (hands.length) {
           setTimedStatus("Set anchor index + control index", 420);
         } else if (state.detectFrames > 10) {
