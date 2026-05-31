@@ -79,6 +79,7 @@ const state = {
   lastStatusAt: 0,
   swipeSamples: [],
   swipeCooldownUntil: 0,
+  trackFeedbackUntil: 0,
 };
 
 let audio = null;
@@ -160,6 +161,7 @@ function setStatus(text) {
 
 function setTimedStatus(text, interval = 700) {
   const now = performance.now();
+  if (now < state.trackFeedbackUntil && !text.startsWith("Track")) return;
   if (now - state.lastStatusAt < interval && els.status.textContent === text) return;
 
   state.lastStatusAt = now;
@@ -269,7 +271,8 @@ function shiftTrack(direction) {
   const nextTrack = state.tracks[nextIndex];
 
   selectTrack(nextTrack.id);
-  setTimedStatus(nextTrack.title, 0);
+  state.trackFeedbackUntil = performance.now() + 950;
+  setTimedStatus(`Track: ${nextTrack.title}`, 0);
 }
 
 function createImpulseResponse(audioContext, seconds = 2.2, decay = 3.4) {
@@ -465,6 +468,7 @@ function stopCamera() {
   state.handCount = 0;
   state.swipeSamples = [];
   state.swipeCooldownUntil = 0;
+  state.trackFeedbackUntil = 0;
   state.modelReady = false;
   els.cameraButton.disabled = false;
   els.cameraButton.textContent = "Camera";
@@ -503,7 +507,7 @@ function analyzeHands(hands) {
     spaceTotal += metrics.spread - metrics.cluster;
     opennessTotal += metrics.avgTipSpread;
 
-    if (metrics.openness > 0.74 && (!openSwipeHand || metrics.openness > openSwipeHand.openness)) {
+    if (metrics.openness > 0.52 && (!openSwipeHand || metrics.openness > openSwipeHand.openness)) {
       openSwipeHand = metrics;
     }
   });
@@ -519,15 +523,20 @@ function updateTrackSwipe(openSwipeHand) {
   const now = performance.now();
 
   if (!openSwipeHand) {
-    state.swipeSamples = [];
+    state.swipeSamples = state.swipeSamples.filter((sample) => now - sample.time < 240);
     return;
   }
 
   const displayX = 1 - openSwipeHand.center.x;
   const displayY = openSwipeHand.center.y;
 
-  state.swipeSamples.push({ x: displayX, y: displayY, time: now });
-  state.swipeSamples = state.swipeSamples.filter((sample) => now - sample.time < 520);
+  state.swipeSamples.push({
+    openness: openSwipeHand.openness,
+    time: now,
+    x: displayX,
+    y: displayY,
+  });
+  state.swipeSamples = state.swipeSamples.filter((sample) => now - sample.time < 760);
 
   if (now < state.swipeCooldownUntil || state.swipeSamples.length < 2) return;
 
@@ -537,11 +546,12 @@ function updateTrackSwipe(openSwipeHand) {
   const dy = Math.abs(last.y - first.y);
   const dt = Math.max(1, last.time - first.time);
   const velocity = Math.abs(dx) / dt;
+  const maxOpenness = Math.max(...state.swipeSamples.map((sample) => sample.openness));
 
-  if (Math.abs(dx) > 0.2 && dy < 0.16 && velocity > 0.00045) {
+  if (Math.abs(dx) > 0.12 && dy < 0.24 && velocity > 0.0002 && maxOpenness > 0.62) {
     shiftTrack(dx > 0 ? 1 : -1);
     state.swipeSamples = [];
-    state.swipeCooldownUntil = now + 900;
+    state.swipeCooldownUntil = now + 850;
   }
 }
 
