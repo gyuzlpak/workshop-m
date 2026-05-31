@@ -53,10 +53,8 @@ input {
 .topbar {
   position: relative;
   z-index: 2;
-  display: grid;
-  grid-template-columns: minmax(150px, auto) 1fr;
+  display: flex;
   align-items: center;
-  gap: 28px;
   width: 100%;
   padding: 24px clamp(18px, 4vw, 48px);
 }
@@ -82,20 +80,6 @@ input {
   background: var(--ink);
 }
 
-.track-list {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.track-list::-webkit-scrollbar {
-  display: none;
-}
-
-.track-button,
 .button,
 .file-control span {
   min-height: 42px;
@@ -111,13 +95,6 @@ input {
     transform 160ms ease;
 }
 
-.track-button {
-  flex: 0 0 auto;
-  padding: 0 16px;
-  font-size: 13px;
-}
-
-.track-button:hover,
 .button:hover,
 .file-control:hover span {
   border-color: var(--ink);
@@ -128,7 +105,6 @@ input {
   opacity: 0.58;
 }
 
-.track-button.is-active,
 .button-primary {
   background: var(--ink);
   border-color: var(--ink);
@@ -232,11 +208,7 @@ input {
   right: clamp(18px, 4vw, 48px);
   width: min(16vw, 190px);
   min-width: 132px;
-  aspect-ratio: 4 / 3;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--soft);
+  overflow: visible;
   opacity: 0;
   transform: translateY(-8px);
   transition:
@@ -244,13 +216,23 @@ input {
     transform 220ms ease;
 }
 
+.camera-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--soft);
+}
+
 .camera-panel.is-visible {
   opacity: 1;
   transform: translateY(0);
 }
 
-.camera-panel video,
-.camera-panel canvas {
+.camera-frame video,
+.camera-frame canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -259,8 +241,20 @@ input {
   transform: scaleX(-1);
 }
 
-.camera-panel canvas {
+.camera-frame canvas {
   pointer-events: none;
+}
+
+.track-caption {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 760px) {
@@ -273,14 +267,8 @@ input {
   }
 
   .topbar {
-    grid-template-columns: 1fr;
     align-items: start;
-    gap: 18px;
     padding: 18px;
-  }
-
-  .track-list {
-    justify-content: flex-start;
   }
 
   .stage {

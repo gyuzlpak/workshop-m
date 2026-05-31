@@ -16,8 +16,6 @@
           <span class="brand-mark" aria-hidden="true"></span>
           <span>Handplay Music</span>
         </a>
-
-        <div class="track-list" id="trackList" role="list" aria-label="음원 목록"></div>
       </header>
 
       <section class="stage" aria-label="음악 조작">
@@ -41,8 +39,11 @@
       </section>
 
       <aside class="camera-panel" aria-label="웹캠 프리뷰">
-        <video id="webcam" playsinline muted></video>
-        <canvas id="overlay" aria-hidden="true"></canvas>
+        <div class="camera-frame">
+          <video id="webcam" playsinline muted></video>
+          <canvas id="overlay" aria-hidden="true"></canvas>
+        </div>
+        <p id="trackCaption" class="track-caption">No track selected</p>
       </aside>
 
       <audio id="player" crossorigin="anonymous" preload="none"></audio>

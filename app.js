@@ -44,7 +44,6 @@ const HAND_CONNECTIONS = [
 
 const els = {
   visual: document.querySelector("#visual"),
-  trackList: document.querySelector("#trackList"),
   playButton: document.querySelector("#playButton"),
   cameraButton: document.querySelector("#cameraButton"),
   fileInput: document.querySelector("#fileInput"),
@@ -53,6 +52,7 @@ const els = {
   webcam: document.querySelector("#webcam"),
   overlay: document.querySelector("#overlay"),
   cameraPanel: document.querySelector(".camera-panel"),
+  trackCaption: document.querySelector("#trackCaption"),
   volumeReadout: document.querySelector("#volumeReadout"),
 };
 
@@ -66,6 +66,7 @@ const state = {
   isPlaying: false,
   cameraActive: false,
   handCount: 0,
+  hasHandInput: false,
   targetVolume: 0.52,
   volume: 0.52,
   targetSpace: 0,
@@ -227,6 +228,11 @@ function loadArtworkImage(track) {
   image.src = track.artworkUrl;
 }
 
+function updateTrackCaption() {
+  const track = state.tracks.find((item) => item.id === state.activeTrackId);
+  els.trackCaption.textContent = track ? track.title : "No track selected";
+}
+
 async function extractMp3Artwork(file) {
   const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
   if (readAscii(header, 0, 3) !== "ID3") return null;
@@ -329,25 +335,6 @@ async function loadVisionTasks() {
   throw error;
 }
 
-function renderTracks() {
-  els.trackList.innerHTML = "";
-
-  state.tracks.forEach((track) => {
-    const button = document.createElement("button");
-    button.className = "track-button";
-    button.type = "button";
-    button.textContent = track.title;
-    button.dataset.trackId = track.id;
-
-    if (track.id === state.activeTrackId) {
-      button.classList.add("is-active");
-    }
-
-    button.addEventListener("click", () => selectTrack(track.id));
-    els.trackList.append(button);
-  });
-}
-
 function selectTrack(id) {
   const track = state.tracks.find((item) => item.id === id);
   if (!track) return;
@@ -357,7 +344,7 @@ function selectTrack(id) {
   els.player.src = track.src;
   els.player.load();
   loadArtworkImage(track);
-  renderTracks();
+  updateTrackCaption();
   setStatus(track.title);
 
   if (state.isPlaying) {
@@ -567,6 +554,7 @@ function stopCamera() {
   webcamStream = null;
   state.cameraActive = false;
   state.handCount = 0;
+  state.hasHandInput = false;
   state.pendingFingerCount = 0;
   state.pendingFingerSince = 0;
   state.trackGestureCooldownUntil = 0;
@@ -592,6 +580,8 @@ function waitForVideoFrame() {
 function analyzeHands(hands) {
   if (!hands.length) {
     state.handCount = 0;
+    state.hasHandInput = false;
+    state.targetVolume = lerp(state.targetVolume, state.volume, 0.06);
     state.targetSpace = lerp(state.targetSpace, 0, 0.04);
     state.pendingFingerCount = 0;
     state.pendingFingerSince = 0;
@@ -615,6 +605,7 @@ function analyzeHands(hands) {
   });
 
   state.handCount = hands.length;
+  state.hasHandInput = true;
   state.targetVolume = clamp(volumeTotal / hands.length, 0.03, 1);
   state.targetSpace = clamp(spaceTotal / hands.length, -1, 1);
   state.openness = opennessTotal / hands.length;
@@ -671,6 +662,7 @@ function drawHandOverlay(hands) {
 }
 
 function drawTrackArtworks(centerX, centerY, baseRadius) {
+  const activity = state.hasHandInput ? 1 : 0;
   const orbitX = baseRadius * (1.72 + state.volume * 0.28);
   const orbitY = baseRadius * (1.18 + state.volume * 0.16);
   const coverRadius = Math.max(18, Math.min(baseRadius * 0.16, 54));
@@ -679,7 +671,7 @@ function drawTrackArtworks(centerX, centerY, baseRadius) {
     loadArtworkImage(track);
 
     const phase =
-      state.blobPhase * (0.18 + index * 0.012) +
+      state.blobPhase * ((0.04 + activity * 0.14) + index * 0.008) +
       index * ((Math.PI * 2) / Math.max(1, state.tracks.length));
     const x = centerX + Math.cos(phase) * orbitX;
     const y = centerY + Math.sin(phase) * orbitY;
@@ -760,15 +752,16 @@ function drawVisual() {
   const height = els.visual.clientHeight;
   const centerX = width * 0.5;
   const centerY = height * 0.51;
+  const activity = state.hasHandInput ? 1 : 0;
   const volumeScale = 0.58 + state.volume * 0.62;
   const baseRadius = Math.min(width, height) * 0.245 * volumeScale;
   const spread = Math.max(0, state.space);
   const cluster = Math.max(0, -state.space);
-  const pulse = 1 + (state.volume - 0.5) * 0.1;
+  const pulse = 1 + (state.volume - 0.5) * (0.04 + activity * 0.06);
   const lobes = 3 + Math.round(spread * 3);
-  const wobble = 0.08 + spread * 0.13 + cluster * 0.04;
+  const wobble = 0.025 + activity * 0.055 + spread * 0.08 + cluster * 0.03;
 
-  state.blobPhase += 0.012 + state.volume * 0.006;
+  state.blobPhase += activity ? 0.012 + state.volume * 0.006 : 0.0025;
   state.volume = lerp(state.volume, state.targetVolume, 0.075);
   state.space = lerp(state.space, state.targetSpace, 0.065);
 
@@ -840,7 +833,6 @@ async function loadLocalFiles(files) {
 
   state.tracks = [...newTracks, ...state.tracks];
   state.activeTrackId = newTracks[0].id;
-  renderTracks();
   selectTrack(newTracks[0].id);
 }
 
@@ -889,7 +881,7 @@ function bindEvents() {
 
 function init() {
   bindEvents();
-  renderTracks();
+  updateTrackCaption();
   drawVisual();
 }
 
